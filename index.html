@@ -283,15 +283,20 @@ async function fetchHazards(){
   return out;
 }
 
-/* ---- 報道イベント（GDELT） ---- */
+/* ---- 報道イベント（GDELT / Cloudflare Worker 経由） ---- */
+// GDELT は CORS ヘッダを返さないため、ブラウザから直接呼べない。
+// Cloudflare Worker の中継を挟む。下の URL を自分の Worker のものに書き換えること。
+//
+//   ↓↓↓ ここを書き換えてください ↓↓↓
+const CONFLICT_PROXY = 'https://gdelt-proxy.dwa8791.workers.dev/';
+//   ↑↑↑ ここを書き換えてください ↑↑↑
+//
 // これは「戦況」ではなく報道の集積地点。詳細に必ず注意書きを出す。
-const CONFLICT_QUERY = '(conflict OR airstrike OR shelling OR offensive OR ceasefire OR insurgency)';
 
 async function fetchConflictReports(){
-  const url = 'https://api.gdeltproject.org/api/v2/geo/geo'
-    + '?query=' + encodeURIComponent(CONFLICT_QUERY)
-    + '&mode=pointdata&format=geojson&timespan=24h';
-  const j = await getJSON(url);
+  // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
+  const j = await getJSON(CONFLICT_PROXY + '?timespan=1440');
+  if(j && j.error) throw new Error('中継エラー: ' + j.error);
   const out = [];
   let n = 0;
   for(const f of j.features || []){
