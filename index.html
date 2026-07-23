@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>世界の災害・報道モニター</title>
+<meta name="description" content="世界の地震・台風・洪水・火山・山火事と、紛争関連報道を地図上に表示します。">
+<meta name="theme-color" content="#0b0f14">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{
+    --ink:#0b0f14; --panel:#121821; --line:#1f2937;
+    --text:#e6edf3; --dim:#8b98a9;
+    --quake:#f2b134; --hazard:#3fb8ff; --conflict:#e5484d;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--ink);color:var(--text);
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;
+    overflow:hidden;
+  }
+  #map{position:absolute;inset:0;background:#0b0f14}
+
+  header{
+    position:absolute;z-index:1000;top:0;left:0;right:0;
+    display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    padding:10px 14px;
+    background:linear-gradient(#0b0f14ee,#0b0f14aa 70%,transparent);
+    pointer-events:none;
+  }
+  header>*{pointer-events:auto}
+  h1{margin:0;font-size:15px;font-weight:650;letter-spacing:.02em;white-space:nowrap}
+  .status{font-family:var(--mono);font-size:11px;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .dot{width:7px;height:7px;border-radius:50%;background:#3ddc84;flex:none}
+  .dot.stale{background:var(--quake)}
+  .dot.dead{background:var(--conflict)}
+
+  .layers{display:flex;gap:6px;flex-wrap:wrap}
+  .layers button{
+    font:inherit;font-size:12px;
+    display:flex;align-items:center;gap:6px;
+    padding:6px 11px;border-radius:999px;cursor:pointer;
+    background:var(--panel);color:var(--dim);
+    border:1px solid var(--line);
+    transition:color .15s,border-color .15s,opacity .15s;
+  }
+  .layers button[aria-pressed="true"]{color:var(--text);border-color:currentColor}
+  .layers button[data-failed="1"]{opacity:.45;cursor:not-allowed}
+  .layers button .sw{width:8px;height:8px;border-radius:2px;background:currentColor;flex:none}
+  .layers button.quake[aria-pressed="true"]{color:var(--quake)}
+  .layers button.hazard[aria-pressed="true"]{color:var(--hazard)}
+  .layers button.conflict[aria-pressed="true"]{color:var(--conflict)}
+  .layers button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+
+  .mk{border-radius:50%;border:1.5px solid #0b0f14aa}
+  .mk.quake{background:var(--quake)}
+  .mk.hazard{background:var(--hazard)}
+  .mk.conflict{background:var(--conflict)}
+  .mk.sev5{animation:pulse 2s ease-out infinite}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 currentColor;opacity:1}
+    100%{box-shadow:0 0 0 16px transparent;opacity:.75}
+  }
+  @media (prefers-reduced-motion:reduce){.mk.sev5{animation:none}}
+
+  #detail{
+    position:absolute;z-index:1200;
+    right:12px;top:64px;width:330px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 84px);overflow:auto;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px 15px;box-shadow:0 18px 50px #0009;
+    transform:translateX(calc(100% + 20px));
+    transition:transform .22s cubic-bezier(.2,.7,.3,1);
+  }
+  #detail.open{transform:none}
+  @media (prefers-reduced-motion:reduce){#detail{transition:none}}
+  @media (max-width:640px){
+    #detail{
+      right:0;left:0;top:auto;bottom:0;width:auto;border-radius:14px 14px 0 0;
+      max-height:62vh;transform:translateY(calc(100% + 20px));
+    }
+    #detail.open{transform:none}
+  }
+  #detail .close{
+    position:absolute;top:9px;right:10px;background:none;border:0;
+    color:var(--dim);font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;border-radius:6px;
+  }
+  #detail .close:hover{color:var(--text)}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;margin:0 0 5px}
+  .eyebrow.quake{color:var(--quake)} .eyebrow.hazard{color:var(--hazard)} .eyebrow.conflict{color:var(--conflict)}
+  #detail h2{margin:0 34px 10px 0;font-size:16px;line-height:1.4;font-weight:640}
+  dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:7px 12px;font-size:13px}
+  dt{color:var(--dim);white-space:nowrap}
+  dd{margin:0;text-align:right}
+  .when{font-family:var(--mono);font-size:11px;color:var(--dim);margin:11px 0 0}
+  .src{margin-top:12px;padding-top:11px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim)}
+  .src a{color:inherit}
+  .arts{margin:9px 0 0;padding:0;list-style:none;font-size:12px}
+  .arts li{margin:0 0 6px}
+  .arts a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--line)}
+  .caveat{
+    margin-top:11px;padding:9px 10px;border-radius:8px;font-size:11.5px;line-height:1.55;
+    background:#e5484d16;border:1px solid #e5484d33;color:#f3b7b9;
+  }
+
+  #legend{
+    position:absolute;z-index:1000;left:12px;bottom:12px;
+    background:#121821cc;border:1px solid var(--line);border-radius:10px;
+    padding:9px 11px;font-size:11px;color:var(--dim);backdrop-filter:blur(6px);line-height:1.7;
+  }
+  #legend b{color:var(--text);font-weight:600;display:block;margin-bottom:3px;font-size:11px}
+
+  /* データ源の障害通知 */
+  #notice{
+    position:absolute;z-index:1100;left:50%;transform:translateX(-50%);
+    top:56px;max-width:min(560px,calc(100vw - 24px));
+    background:#121821ee;border:1px solid #f2b13455;border-radius:10px;
+    padding:10px 13px;font-size:12px;line-height:1.6;color:#f0d9a8;
+    box-shadow:0 10px 30px #0007;display:none;
+  }
+  #notice.show{display:block}
+  #notice button{
+    background:none;border:0;color:#f0d9a8;cursor:pointer;font:inherit;
+    text-decoration:underline;padding:0;margin-left:6px;
+  }
+  .leaflet-container{background:#0b0f14}
+  .leaflet-control-attribution{background:#121821cc!important;color:#6b7785!important;font-size:10px!important}
+  .leaflet-control-attribution a{color:#8b98a9!important}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<header>
+  <h1>世界の災害・報道モニター</h1>
+  <div class="layers" id="layers"></div>
+  <div class="status"><span class="dot" id="dot"></span><span id="stamp">読み込み中…</span></div>
+</header>
+
+<div id="notice" role="status"></div>
+
+<aside id="detail" role="dialog" aria-labelledby="dTitle" hidden>
+  <button class="close" id="dClose" aria-label="閉じる">&times;</button>
+  <p class="eyebrow" id="dKind"></p>
+  <h2 id="dTitle"></h2>
+  <dl id="dList"></dl>
+  <p class="when" id="dWhen"></p>
+  <div id="dExtra"></div>
+  <p class="src" id="dSrc"></p>
+</aside>
+
+<div id="legend">
+  <b>円の大きさ＝深刻度</b>
+  地震：規模（M）／災害：GDACS警戒レベル<br>
+  報道：直近24時間の記事数
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+'use strict';
+
+/* =========================================================================
+   データ源
+   ブラウザから直接呼ぶため、CORS が通らない源は失敗し得る。
+   各層は独立して失敗し、他の層は通常どおり表示される設計にしている。
+   ========================================================================= */
+
+const REFRESH_MS = 60 * 60 * 1000;   // 1時間おき（開いている間のみ）
+
+const LAYERS = {
+  quake:    { label:'地震',            source:'USGS' },
+  hazard:   { label:'台風・洪水・火山', source:'GDACS' },
+  conflict: { label:'報道イベント',     source:'GDELT' },
+};
+
+const state = {
+  on:     { quake:true, hazard:true, conflict:true },
+  status: { quake:null, hazard:null, conflict:null },   // 'ok' | 'fail'
+  events: { quake:[],  hazard:[],  conflict:[] },
+  updatedAt: null,
+};
+
+/* ---- 取得ユーティリティ ---- */
+async function getJSON(url, timeoutMs = 20000){
+  const ac = new AbortController();
+  const t = setTimeout(()=>ac.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, { signal: ac.signal, mode:'cors' });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } finally { clearTimeout(t); }
+}
+
+/* ---- 地震（USGS） ---- */
+// summary feed は {magnitude}_{period}.geojson のテンプレートのみ有効。
+const USGS = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson';
+
+function quakeSeverity(mag){
+  if(mag == null) return 1;
+  if(mag >= 7) return 5;
+  if(mag >= 6) return 4;
+  if(mag >= 5) return 3;
+  if(mag >= 4) return 2;
+  return 1;
+}
+
+async function fetchQuakes(){
+  const j = await getJSON(USGS);
+  const out = [];
+  for(const f of j.features || []){
+    const p = f.properties || {};
+    const c = (f.geometry && f.geometry.coordinates) || [];
+    // GeoJSON は [経度, 緯度, 深さ]。緯度は c[1]。
+    const lon = c[0], lat = c[1], depth = c[2];
+    if(typeof lat !== 'number' || typeof lon !== 'number') continue;
+    out.push({
+      id:'eq:'+f.id, layer:'quake',
+      kind: p.tsunami ? '地震・津波警戒' : '地震',
+      title: p.place || '震源不明',
+      lat, lon,
+      time: p.time,                       // epoch ミリ秒
+      severity: quakeSeverity(p.mag),
+      url: p.url || null, source:'USGS',
+      detail:{
+        マグニチュード: p.mag == null ? '解析中' : 'M ' + p.mag.toFixed(1),
+        深さ: typeof depth === 'number' ? depth.toFixed(0) + ' km' : '不明',
+        津波: p.tsunami ? 'あり（現地当局の情報に従ってください）' : 'なし',
+        速報区分: p.status === 'reviewed' ? '精査済み' : '自動速報値',
+        体感報告数: p.felt == null ? '—' : String(p.felt),
+      },
+    });
+  }
+  return out;
+}
+
+/* ---- 台風・洪水・火山・山火事（GDACS） ---- */
+const GDACS_LABEL = {
+  TC:'熱帯低気圧・台風', FL:'洪水', VO:'火山', WF:'山火事',
+  DR:'干ばつ', EQ:'地震', TS:'津波',
+};
+function ymd(d){ return d.toISOString().slice(0,10); }
+function gdacsSeverity(a){
+  a = String(a || '').toLowerCase();
+  if(a === 'red') return 5;
+  if(a === 'orange') return 3;
+  return 1;
+}
+
+async function fetchHazards(){
+  const to = new Date(), from = new Date(Date.now() - 30*864e5);
+  // パラメータ名は小文字（fromdate / todate / alertlevel）。
+  const url = 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH'
+    + '?eventlist=TC;FL;VO;WF;DR'
+    + '&fromdate=' + ymd(from) + '&todate=' + ymd(to)
+    + '&alertlevel=Green;Orange;Red';
+  const j = await getJSON(url);
+  const out = [];
+  for(const f of j.features || []){
+    const p = f.properties || {};
+    const c = (f.geometry && f.geometry.coordinates) || [];
+    const lon = c[0], lat = c[1];
+    if(typeof lat !== 'number' || typeof lon !== 'number') continue;
+    const t = Date.parse(p.fromdate || p.todate || '') || Date.now();
+    out.push({
+      id:'gd:'+p.eventtype+':'+p.eventid+':'+(p.episodeid||0), layer:'hazard',
+      kind: GDACS_LABEL[p.eventtype] || p.eventtype || '災害',
+      title: p.name || p.eventname || p.country || '発生地域不明',
+      lat, lon, time:t,
+      severity: gdacsSeverity(p.alertlevel),
+      url: (p.url && p.url.report) ? p.url.report : null,
+      source:'GDACS',
+      detail:{
+        警戒レベル: ({Red:'赤（重大）',Orange:'橙（中程度）',Green:'緑（軽微）'})[p.alertlevel] || p.alertlevel || '—',
+        '国・地域': p.country || '—',
+        深刻度: (p.severitydata && p.severitydata.severitytext) || '—',
+        発生日: new Date(t).toISOString().slice(0,10),
+      },
+    });
+  }
+  return out;
+}
+
+/* ---- 報道イベント（GDELT） ---- */
+// これは「戦況」ではなく報道の集積地点。詳細に必ず注意書きを出す。
+const CONFLICT_QUERY = '(conflict OR airstrike OR shelling OR offensive OR ceasefire OR insurgency)';
+
+async function fetchConflictReports(){
+  const url = 'https://api.gdeltproject.org/api/v2/geo/geo'
+    + '?query=' + encodeURIComponent(CONFLICT_QUERY)
+    + '&mode=pointdata&format=geojson&timespan=24h';
+  const j = await getJSON(url);
+  const out = [];
+  let n = 0;
+  for(const f of j.features || []){
+    const p = f.properties || {};
+    const c = (f.geometry && f.geometry.coordinates) || [];
+    const lon = c[0], lat = c[1];
+    if(typeof lat !== 'number' || typeof lon !== 'number') continue;
+    const count = Number(p.count) || 1;
+    out.push({
+      id:'news:'+(p.name||'')+':'+(n++), layer:'conflict',
+      kind:'報道イベント',
+      title: p.name || '地点不明',
+      lat, lon, time: Date.now(),
+      severity: count >= 40 ? 4 : count >= 15 ? 3 : 2,
+      url:null, source:'GDELT',
+      detail:{
+        報道件数: '直近24時間で ' + count + ' 件',
+        地点: p.name || '—',
+        注意: 'これは報道の集積地点であり、戦況・被害の確認情報ではありません。',
+      },
+      articles: extractLinks(p.html).slice(0,5),
+    });
+  }
+  return out;
+}
+
+function extractLinks(html){
+  if(!html || typeof html !== 'string') return [];
+  const out = [];
+  const re = /<a[^>]+href="([^"]+)"[^>]*>([^<]*)<\/a>/gi;
+  let m;
+  while((m = re.exec(html))){
+    const title = m[2].replace(/&amp;/g,'&').replace(/&quot;/g,'"').trim();
+    if(title) out.push({ url:m[1], title });
+  }
+  return out;
+}
+
+/* =========================================================================
+   地図
+   ========================================================================= */
+let map, groups = {};
+
+function initMap(){
+  map = L.map('map', { worldCopyJump:true, minZoom:2 }).setView([20,10], 2);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution:'&copy; OpenStreetMap &copy; CARTO', maxZoom:18,
+  }).addTo(map);
+  for(const k of Object.keys(LAYERS)) groups[k] = L.layerGroup().addTo(map);
+}
+
+function buildToggles(){
+  const box = document.getElementById('layers');
+  for(const [k,v] of Object.entries(LAYERS)){
+    const b = document.createElement('button');
+    b.className = k;
+    b.setAttribute('aria-pressed','true');
+    b.innerHTML = '<span class="sw"></span>' + v.label + ' <span data-n>…</span>';
+    b.onclick = () => {
+      if(b.dataset.failed === '1') return;
+      state.on[k] = !state.on[k];
+      b.setAttribute('aria-pressed', String(state.on[k]));
+      state.on[k] ? map.addLayer(groups[k]) : map.removeLayer(groups[k]);
+    };
+    box.appendChild(b);
+  }
+}
+
+function radius(sev){ return 4 + sev * 2.6; }
+
+function renderLayer(key){
+  const g = groups[key];
+  g.clearLayers();
+  for(const ev of state.events[key]){
+    const r = radius(ev.severity);
+    const m = L.marker([ev.lat, ev.lon], {
+      icon: L.divIcon({
+        className:'',
+        html:'<div class="mk '+ev.layer+(ev.severity>=5?' sev5':'')+'" style="width:'+(r*2)+'px;height:'+(r*2)+'px"></div>',
+        iconSize:[r*2,r*2], iconAnchor:[r,r],
+      }),
+      keyboard:true, title:ev.title,
+    });
+    m.on('click', ()=>showDetail(ev));
+    m.addTo(g);
+  }
+  const btn = document.querySelector('#layers button.' + key);
+  if(btn){
+    const n = btn.querySelector('[data-n]');
+    if(state.status[key] === 'fail'){
+      n.textContent = '取得失敗';
+      btn.dataset.failed = '1';
+      btn.setAttribute('aria-pressed','false');
+    } else {
+      n.textContent = String(state.events[key].length);
+      delete btn.dataset.failed;
+    }
+  }
+}
+
+function updateStatusBar(){
+  const failed = Object.entries(state.status).filter(([,v]) => v === 'fail').map(([k]) => k);
+  const okCount = Object.values(state.status).filter(v => v === 'ok').length;
+  const dot = document.getElementById('dot');
+  dot.classList.toggle('stale', failed.length > 0 && okCount > 0);
+  dot.classList.toggle('dead', okCount === 0);
+
+  const t = state.updatedAt ? new Date(state.updatedAt) : null;
+  const hhmm = t ? String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0') : '--:--';
+  document.getElementById('stamp').textContent =
+    okCount === 0 ? 'データを取得できません' : hhmm + ' 更新';
+
+  const notice = document.getElementById('notice');
+  if(failed.length){
+    const names = failed.map(k => LAYERS[k].label + '（' + LAYERS[k].source + '）').join('、');
+    notice.innerHTML = '';
+    notice.append(names + ' を取得できませんでした。他の情報は通常どおり表示しています。');
+    const b = document.createElement('button');
+    b.textContent = '再試行';
+    b.onclick = () => loadAll();
+    notice.appendChild(b);
+    notice.classList.add('show');
+  } else {
+    notice.classList.remove('show');
+  }
+}
+
+/* ---- 詳細パネル ---- */
+function showDetail(ev){
+  const d = document.getElementById('detail');
+  d.hidden = false;
+  const kind = document.getElementById('dKind');
+  kind.className = 'eyebrow ' + ev.layer;
+  kind.textContent = ev.kind;
+  document.getElementById('dTitle').textContent = ev.title;
+
+  const dl = document.getElementById('dList');
+  dl.innerHTML = '';
+  for(const [k,v] of Object.entries(ev.detail || {})){
+    if(k === '注意') continue;
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v;
+    dl.append(dt, dd);
+  }
+
+  const when = new Date(ev.time);
+  document.getElementById('dWhen').textContent =
+    isNaN(when) ? '' : when.toLocaleString('ja-JP', { hour12:false });
+
+  const extra = document.getElementById('dExtra');
+  extra.innerHTML = '';
+  if(ev.detail && ev.detail['注意']){
+    const p = document.createElement('p');
+    p.className = 'caveat';
+    p.textContent = ev.detail['注意'];
+    extra.appendChild(p);
+  }
+  if(ev.articles && ev.articles.length){
+    const ul = document.createElement('ul');
+    ul.className = 'arts';
+    for(const a of ev.articles){
+      const li = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = a.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      link.textContent = a.title;
+      li.appendChild(link); ul.appendChild(li);
+    }
+    extra.appendChild(ul);
+  }
+
+  const src = document.getElementById('dSrc');
+  src.innerHTML = '';
+  src.append('出典：' + ev.source);
+  if(ev.url){
+    src.append(' / ');
+    const a = document.createElement('a');
+    a.href = ev.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    a.textContent = '公式ページ';
+    src.appendChild(a);
+  }
+
+  requestAnimationFrame(()=> d.classList.add('open'));
+  map.panTo([ev.lat, ev.lon], { animate:true });
+}
+
+function closeDetail(){
+  const d = document.getElementById('detail');
+  d.classList.remove('open');
+  setTimeout(()=>{ d.hidden = true; }, 220);
+}
+
+/* ---- 読み込み ---- */
+// 各層を独立して取得する。1つが失敗しても他は表示される。
+async function loadLayer(key, fn){
+  try{
+    state.events[key] = await fn();
+    state.status[key] = 'ok';
+  }catch(err){
+    // 前回のデータがあれば保持したまま、状態だけ失敗にする
+    state.status[key] = 'fail';
+    console.warn('[' + key + '] 取得失敗:', err && err.message);
+  }
+  renderLayer(key);
+  updateStatusBar();
+}
+
+async function loadAll(){
+  document.getElementById('notice').classList.remove('show');
+  await Promise.allSettled([
+    loadLayer('quake', fetchQuakes),
+    loadLayer('hazard', fetchHazards),
+    loadLayer('conflict', fetchConflictReports),
+  ]);
+  if(Object.values(state.status).some(v => v === 'ok')) state.updatedAt = Date.now();
+  updateStatusBar();
+}
+
+initMap();
+buildToggles();
+document.getElementById('dClose').onclick = closeDetail;
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeDetail(); });
+loadAll();
+setInterval(loadAll, REFRESH_MS);
+// タブに戻ったとき、最終更新から1時間以上経っていれば取り直す
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible' &&
+     state.updatedAt && Date.now() - state.updatedAt > REFRESH_MS){
+    loadAll();
+  }
+});
+</script>
+</body>
+</html>
