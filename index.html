@@ -179,6 +179,7 @@ const LAYERS = {
 const state = {
   on:     { quake:true, hazard:true, conflict:true },
   status: { quake:null, hazard:null, conflict:null },   // 'ok' | 'fail'
+  reason: { quake:null, hazard:null, conflict:null },   // 失敗理由（任意）
   events: { quake:[],  hazard:[],  conflict:[] },
   updatedAt: null,
 };
@@ -189,7 +190,8 @@ async function getJSON(url, timeoutMs = 20000){
   const t = setTimeout(()=>ac.abort(), timeoutMs);
   try{
     const res = await fetch(url, { signal: ac.signal, mode:'cors' });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
+    // 429（アクセス制限）は本文に理由が入っているため、投げずに読む
+    if(!res.ok && res.status !== 429) throw new Error('HTTP ' + res.status);
     return await res.json();
   } finally { clearTimeout(t); }
 }
@@ -295,7 +297,13 @@ const CONFLICT_PROXY = 'https://gdelt-proxy.dwa8791.workers.dev/';
 
 async function fetchConflictReports(){
   // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
+  // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
   const j = await getJSON(CONFLICT_PROXY + '?timespan=1440');
+  if(j && j.error === 'ratelimited'){
+    const e = new Error('GDELT のアクセス制限中です。数分おいて再試行してください。');
+    e.temporary = true;
+    throw e;
+  }
   if(j && j.error) throw new Error('中継エラー: ' + j.error);
   const out = [];
   let n = 0;
@@ -411,7 +419,10 @@ function updateStatusBar(){
 
   const notice = document.getElementById('notice');
   if(failed.length){
-    const names = failed.map(k => LAYERS[k].label + '（' + LAYERS[k].source + '）').join('、');
+    const names = failed.map(k => {
+      const base = LAYERS[k].label + '（' + LAYERS[k].source + '）';
+      return state.reason[k] ? base + ' ' + state.reason[k] : base;
+    }).join('、');
     notice.innerHTML = '';
     notice.append(names + ' を取得できませんでした。他の情報は通常どおり表示しています。');
     const b = document.createElement('button');
@@ -497,6 +508,9 @@ async function loadLayer(key, fn){
   }catch(err){
     // 前回のデータがあれば保持したまま、状態だけ失敗にする
     state.status[key] = 'fail';
+    state.reason[key] = (err && err.temporary)
+      ? 'アクセス制限中（時間をおくと自動で戻ります）'
+      : null;
     console.warn('[' + key + '] 取得失敗:', err && err.message);
   }
   renderLayer(key);
