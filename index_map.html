@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>世界の災害・報道モニター</title>
+<meta name="description" content="世界の地震・台風・洪水・火山・山火事と、紛争関連報道を地図上に表示します。">
+<meta name="theme-color" content="#0b0f14">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{
+    --ink:#0b0f14; --panel:#121821; --line:#1f2937;
+    --text:#e6edf3; --dim:#8b98a9;
+    --quake:#f2b134; --hazard:#3fb8ff; --conflict:#e5484d;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--ink);color:var(--text);
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;
+    overflow:hidden;
+  }
+  #map{position:absolute;inset:0;background:#0b0f14}
+
+  header{
+    position:absolute;z-index:1000;top:0;left:0;right:0;
+    display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    padding:10px 14px;
+    background:linear-gradient(#0b0f14ee,#0b0f14aa 70%,transparent);
+    pointer-events:none;
+  }
+  header>*{pointer-events:auto}
+  h1{margin:0;font-size:15px;font-weight:650;letter-spacing:.02em;white-space:nowrap}
+  .status{font-family:var(--mono);font-size:11px;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .dot{width:7px;height:7px;border-radius:50%;background:#3ddc84;flex:none}
+  .dot.stale{background:var(--quake)}
+  .dot.dead{background:var(--conflict)}
+
+  .kinds{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .kinds button{
+    font:inherit;font-size:12px;
+    display:flex;align-items:center;gap:5px;
+    padding:4px 10px 4px 4px;border-radius:999px;cursor:pointer;
+    background:var(--panel);color:var(--dim);
+    border:1px solid var(--line);
+    transition:color .15s,border-color .15s,opacity .15s,background .15s;
+  }
+  /* 非選択時はアイコンを退色させ、選択中との差をはっきりさせる */
+  .kinds button[aria-pressed="false"] .mk{filter:grayscale(1);opacity:.4}
+  .kinds button[aria-pressed="true"]{color:var(--text)}
+  .kinds button.quake[aria-pressed="true"]{border-color:var(--quake)}
+  .kinds button.hazard[aria-pressed="true"]{border-color:var(--hazard)}
+  .kinds button.conflict[aria-pressed="true"]{border-color:var(--conflict)}
+  .kinds button[data-failed="1"]{opacity:.4;cursor:not-allowed}
+  .kinds button .ct{font-family:var(--mono);font-size:10.5px;opacity:.75}
+  .kinds button .lb{white-space:nowrap}
+  .kinds button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .kinds button.all{
+    padding:6px 12px;font-size:11.5px;
+    border-style:dashed;
+  }
+  .kinds button.all[aria-pressed="true"]{color:var(--dim)}
+  /* 狭い画面ではラベルを隠し、アイコンと件数だけにする */
+  @media (max-width:900px){
+    .kinds button .lb{display:none}
+    .kinds button{padding:4px 8px 4px 4px}
+  }
+
+  .mk{
+    border-radius:50%;border:1.5px solid #0b0f14aa;
+    display:flex;align-items:center;justify-content:center;
+    line-height:1;
+  }
+  /* 記号は背景色の上に濃色で置く。マーカー色はいずれも明度が高いので
+     暗い文字色にすると、小さくても輪郭がはっきり読める。 */
+  .mk .ic{display:block}
+  .mk{overflow:hidden}
+  .mk.quake{background:var(--quake)}
+  .mk.hazard{background:var(--hazard)}
+  .mk.conflict{background:var(--conflict)}
+  .mk.sev5{animation:pulse 2s ease-out infinite}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 currentColor;opacity:1}
+    100%{box-shadow:0 0 0 16px transparent;opacity:.75}
+  }
+  @media (prefers-reduced-motion:reduce){.mk.sev5{animation:none}}
+
+  #detail{
+    position:absolute;z-index:1200;
+    right:12px;top:64px;width:330px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 84px);overflow:auto;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px 15px;box-shadow:0 18px 50px #0009;
+    transform:translateX(calc(100% + 20px));
+    transition:transform .22s cubic-bezier(.2,.7,.3,1);
+  }
+  #detail.open{transform:none}
+  @media (prefers-reduced-motion:reduce){#detail{transition:none}}
+  @media (max-width:640px){
+    #detail{
+      right:0;left:0;top:auto;bottom:0;width:auto;border-radius:14px 14px 0 0;
+      max-height:62vh;transform:translateY(calc(100% + 20px));
+    }
+    #detail.open{transform:none}
+  }
+  #detail .close{
+    position:absolute;top:9px;right:10px;background:none;border:0;
+    color:var(--dim);font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;border-radius:6px;
+  }
+  #detail .close:hover{color:var(--text)}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;margin:0 0 5px}
+  .eyebrow.quake{color:var(--quake)} .eyebrow.hazard{color:var(--hazard)} .eyebrow.conflict{color:var(--conflict)}
+  #detail h2{margin:0;font-size:16px;line-height:1.4;font-weight:640}
+  .dhead{display:flex;gap:12px;align-items:flex-start;margin:0 30px 12px 0}
+  .dicon{flex:none;width:58px;height:58px;border-radius:12px;overflow:hidden;
+         box-shadow:0 3px 12px #0006}
+  .dicon svg{display:block;width:100%;height:100%}
+  dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:7px 12px;font-size:13px}
+  dt{color:var(--dim);white-space:nowrap}
+  dd{margin:0;text-align:right}
+  .when{font-family:var(--mono);font-size:11px;color:var(--dim);margin:11px 0 0}
+  .src{margin-top:12px;padding-top:11px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim)}
+  .src a{color:inherit}
+  .arts{margin:9px 0 0;padding:0;list-style:none;font-size:12px}
+  .arts li{margin:0 0 6px}
+  .arts a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--line)}
+  .caveat{
+    margin-top:11px;padding:9px 10px;border-radius:8px;font-size:11.5px;line-height:1.55;
+    background:#e5484d16;border:1px solid #e5484d33;color:#f3b7b9;
+  }
+
+  #legend{
+    position:absolute;z-index:1000;left:12px;bottom:12px;
+    background:#121821cc;border:1px solid var(--line);border-radius:10px;
+    padding:9px 11px;font-size:11px;color:var(--dim);backdrop-filter:blur(6px);line-height:1.7;
+  }
+  #legend b{color:var(--text);font-weight:600;display:block;margin-bottom:6px;font-size:11px}
+  @media (max-width:640px){
+    #legend{max-width:calc(100vw - 24px);bottom:8px;left:8px;padding:7px 9px}
+    .lg-row{max-width:none}
+  }
+
+  /* データ源の障害通知 */
+  #notice{
+    position:absolute;z-index:1100;left:50%;transform:translateX(-50%);
+    top:56px;max-width:min(560px,calc(100vw - 24px));
+    background:#121821ee;border:1px solid #f2b13455;border-radius:10px;
+    padding:10px 13px;font-size:12px;line-height:1.6;color:#f0d9a8;
+    box-shadow:0 10px 30px #0007;display:none;
+  }
+  #notice.show{display:block}
+  #notice button{
+    background:none;border:0;color:#f0d9a8;cursor:pointer;font:inherit;
+    text-decoration:underline;padding:0;margin-left:6px;
+  }
+  .leaflet-container{background:#0b0f14}
+  .leaflet-control-attribution{background:#121821cc!important;color:#6b7785!important;font-size:10px!important}
+  .leaflet-control-attribution a{color:#8b98a9!important}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<header>
+  <h1>世界の災害・報道モニター</h1>
+  <div class="kinds" id="kinds"></div>
+  <div class="status"><span class="dot" id="dot"></span><span id="stamp">読み込み中…</span></div>
+</header>
+
+<div id="notice" role="status"></div>
+
+<aside id="detail" role="dialog" aria-labelledby="dTitle" hidden>
+  <button class="close" id="dClose" aria-label="閉じる">&times;</button>
+  <div class="dhead">
+    <div class="dicon" id="dIcon"></div>
+    <div>
+      <p class="eyebrow" id="dKind"></p>
+      <h2 id="dTitle"></h2>
+    </div>
+  </div>
+  <dl id="dList"></dl>
+  <p class="when" id="dWhen"></p>
+  <div id="dExtra"></div>
+  <p class="src" id="dSrc"></p>
+</aside>
+
+<div id="legend">
+  <b>円の大きさ＝深刻度</b>
+  上のボタンで種類ごとに表示を切り替えられます
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+'use strict';
+
+/* =========================================================================
+   データ源
+   ブラウザから直接呼ぶため、CORS が通らない源は失敗し得る。
+   各層は独立して失敗し、他の層は通常どおり表示される設計にしている。
+   ========================================================================= */
+
+const REFRESH_MS = 60 * 60 * 1000;   // 1時間おき（開いている間のみ）
+
+const LAYERS = {
+  quake:    { label:'地震',            source:'USGS' },
+  hazard:   { label:'台風・洪水・火山', source:'GDACS' },
+  conflict: { label:'報道イベント',     source:'GDELT' },
+};
+
+const state = {
+  on:     { EQ:true, TC:true, FL:true, VO:true, WF:true, DR:true, NEWS:true },
+  status: { quake:null, hazard:null, conflict:null },   // 'ok' | 'fail'
+  reason: { quake:null, hazard:null, conflict:null },   // 失敗理由（任意）
+  events: { quake:[],  hazard:[],  conflict:[] },
+  updatedAt: null,
+};
+
+/* ---- 取得ユーティリティ ---- */
+async function getJSON(url, timeoutMs = 20000){
+  const ac = new AbortController();
+  const t = setTimeout(()=>ac.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, { signal: ac.signal, mode:'cors' });
+    // 429（アクセス制限）は本文に理由が入っているため、投げずに読む
+    if(!res.ok && res.status !== 429) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } finally { clearTimeout(t); }
+}
+
+/* ---- 地震（USGS） ---- */
+// summary feed は {magnitude}_{period}.geojson のテンプレートのみ有効。
+const USGS = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson';
+
+function quakeSeverity(mag){
+  if(mag == null) return 1;
+  if(mag >= 7) return 5;
+  if(mag >= 6) return 4;
+  if(mag >= 5) return 3;
+  if(mag >= 4) return 2;
+  return 1;
+}
+
+async function fetchQuakes(){
+  const j = await getJSON(USGS);
+  const out = [];
+  for(const f of j.features || []){
+    const p = f.properties || {};
+    const c = (f.geometry && f.geometry.coordinates) || [];
+    // GeoJSON は [経度, 緯度, 深さ]。緯度は c[1]。
+    const lon = c[0], lat = c[1], depth = c[2];
+    if(typeof lat !== 'number' || typeof lon !== 'number') continue;
+    out.push({
+      id:'eq:'+f.id, layer:'quake',
+      icon:'EQ',
+      kind: p.tsunami ? '地震・津波警戒' : '地震',
+      title: p.place || '震源不明',
+      lat, lon,
+      time: p.time,                       // epoch ミリ秒
+      severity: quakeSeverity(p.mag),
+      url: p.url || null, source:'USGS',
+      detail:{
+        マグニチュード: p.mag == null ? '解析中' : 'M ' + p.mag.toFixed(1),
+        深さ: typeof depth === 'number' ? depth.toFixed(0) + ' km' : '不明',
+        津波: p.tsunami ? 'あり（現地当局の情報に従ってください）' : 'なし',
+        速報区分: p.status === 'reviewed' ? '精査済み' : '自動速報値',
+        体感報告数: p.felt == null ? '—' : String(p.felt),
+      },
+    });
+  }
+  return out;
+}
+
+/* ---- 台風・洪水・火山・山火事（GDACS） ---- */
+const GDACS_LABEL = {
+  TC:'熱帯低気圧・台風', FL:'洪水', VO:'火山', WF:'山火事',
+  DR:'干ばつ', EQ:'地震', TS:'津波',
+};
+function ymd(d){ return d.toISOString().slice(0,10); }
+function gdacsSeverity(a){
+  a = String(a || '').toLowerCase();
+  if(a === 'red') return 5;
+  if(a === 'orange') return 3;
+  return 1;
+}
+
+async function fetchHazards(){
+  const to = new Date(), from = new Date(Date.now() - 30*864e5);
+  // パラメータ名は小文字（fromdate / todate / alertlevel）。
+  const url = 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH'
+    + '?eventlist=TC;FL;VO;WF;DR'
+    + '&fromdate=' + ymd(from) + '&todate=' + ymd(to)
+    + '&alertlevel=Green;Orange;Red';
+  const j = await getJSON(url);
+  const out = [];
+  for(const f of j.features || []){
+    const p = f.properties || {};
+    const c = (f.geometry && f.geometry.coordinates) || [];
+    const lon = c[0], lat = c[1];
+    if(typeof lat !== 'number' || typeof lon !== 'number') continue;
+    const t = Date.parse(p.fromdate || p.todate || '') || Date.now();
+    out.push({
+      id:'gd:'+p.eventtype+':'+p.eventid+':'+(p.episodeid||0), layer:'hazard',
+      icon: p.eventtype || 'FL',
+      kind: GDACS_LABEL[p.eventtype] || p.eventtype || '災害',
+      title: p.name || p.eventname || p.country || '発生地域不明',
+      lat, lon, time:t,
+      severity: gdacsSeverity(p.alertlevel),
+      url: (p.url && p.url.report) ? p.url.report : null,
+      source:'GDACS',
+      detail:{
+        警戒レベル: ({Red:'赤（重大）',Orange:'橙（中程度）',Green:'緑（軽微）'})[p.alertlevel] || p.alertlevel || '—',
+        '国・地域': p.country || '—',
+        深刻度: (p.severitydata && p.severitydata.severitytext) || '—',
+        発生日: new Date(t).toISOString().slice(0,10),
+      },
+    });
+  }
+  return out;
+}
+
+/* ---- 報道イベント（GDELT / Cloudflare Worker 経由） ---- */
+// GDELT は CORS ヘッダを返さないため、ブラウザから直接呼べない。
+// Cloudflare Worker の中継を挟む。下の URL を自分の Worker のものに書き換えること。
+//
+//   ↓↓↓ ここを書き換えてください ↓↓↓
+const CONFLICT_PROXY = 'https://gdelt-proxy.dwa8791.workers.dev/';
+//   ↑↑↑ ここを書き換えてください ↑↑↑
+//
+// これは「戦況」ではなく報道の集積地点。詳細に必ず注意書きを出す。
+
+async function fetchConflictReports(){
+  // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
+  // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
+  const j = await getJSON(CONFLICT_PROXY + '?timespan=1440');
+  if(j && j.error === 'ratelimited'){
+    const e = new Error('GDELT のアクセス制限中です。数分おいて再試行してください。');
+    e.temporary = true;
+    throw e;
+  }
+  if(j && j.error) throw new Error('中継エラー: ' + j.error);
+  const out = [];
+  let n = 0;
+  for(const f of j.features || []){
+    const p = f.properties || {};
+    const c = (f.geometry && f.geometry.coordinates) || [];
+    const lon = c[0], lat = c[1];
+    if(typeof lat !== 'number' || typeof lon !== 'number') continue;
+    const count = Number(p.count) || 1;
+    out.push({
+      id:'news:'+(p.name||'')+':'+(n++), layer:'conflict',
+      icon:'NEWS',
+      kind:'報道イベント',
+      title: p.name || '地点不明',
+      lat, lon, time: Date.now(),
+      severity: count >= 40 ? 4 : count >= 15 ? 3 : 2,
+      url:null, source:'GDELT',
+      detail:{
+        報道件数: '直近24時間で ' + count + ' 件',
+        地点: p.name || '—',
+        注意: 'これは報道の集積地点であり、戦況・被害の確認情報ではありません。',
+      },
+      articles: extractLinks(p.html).slice(0,5),
+    });
+  }
+  return out;
+}
+
+function extractLinks(html){
+  if(!html || typeof html !== 'string') return [];
+  const out = [];
+  const re = /<a[^>]+href="([^"]+)"[^>]*>([^<]*)<\/a>/gi;
+  let m;
+  while((m = re.exec(html))){
+    const title = m[2].replace(/&amp;/g,'&').replace(/&quot;/g,'"').trim();
+    if(title) out.push({ url:m[1], title });
+  }
+  return out;
+}
+
+/* =========================================================================
+   地図
+   ========================================================================= */
+let map, groups = {};
+
+function initMap(){
+  map = L.map('map', { worldCopyJump:true, minZoom:2 }).setView([20,10], 2);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution:'&copy; OpenStreetMap &copy; CARTO', maxZoom:18,
+  }).addTo(map);
+  for(const k of Object.keys(LAYERS)) groups[k] = L.layerGroup().addTo(map);
+}
+
+
+function buildKindToggles(){
+  const box = document.getElementById('kinds');
+  box.innerHTML = '';
+  for(const k of KIND_ORDER){
+    const ic = ICONS[k];
+    const layer = KIND_LAYER[k];
+    const b = document.createElement('button');
+    b.dataset.kind = k;
+    b.className = layer;
+    b.setAttribute('aria-pressed','true');
+    // ボタン内にも実際のアイコンを表示する（凡例を兼ねる）
+    b.innerHTML =
+      '<span class="mk ' + layer + '" style="width:22px;height:22px">'
+      + '<svg class="ic" width="20" height="20" viewBox="0 0 100 100" style="margin:1px">'
+      + ic.mini + '</svg></span>'
+      + '<span class="lb">' + ic.label + '</span>'
+      + '<span class="ct" data-n>…</span>';
+    b.onclick = () => {
+      if(b.dataset.failed === '1') return;
+      state.on[k] = !state.on[k];
+      redrawAll();
+    };
+    box.appendChild(b);
+  }
+  const all = document.createElement('button');
+  all.id = 'kindAll';
+  all.className = 'all';
+  all.textContent = 'すべて解除';
+  all.onclick = () => {
+    const allOn = KIND_ORDER.every(x => state.on[x]);
+    // すべて表示中なら全解除、そうでなければ全表示
+    for(const x of KIND_ORDER) state.on[x] = !allOn;
+    redrawAll();
+  };
+  box.appendChild(all);
+}
+
+// 表示切替のたびに3層とも描き直す（種類は層をまたぐため）
+function redrawAll(){
+  for(const key of Object.keys(groups)) renderLayer(key);
+}
+
+
+function buildToggles(){
+  const box = document.getElementById('layers');
+  for(const [k,v] of Object.entries(LAYERS)){
+    const b = document.createElement('button');
+    b.className = k;
+    b.setAttribute('aria-pressed','true');
+    b.innerHTML = '<span class="sw"></span>' + v.label + ' <span data-n>…</span>';
+    b.onclick = () => {
+      if(b.dataset.failed === '1') return;
+      state.on[k] = !state.on[k];
+      b.setAttribute('aria-pressed', String(state.on[k]));
+      state.on[k] ? map.addLayer(groups[k]) : map.removeLayer(groups[k]);
+    };
+    box.appendChild(b);
+  }
+}
+
+const ICONS = {
+  "VO": {
+    "label": "火山",
+    "detail": "\n    <defs>\n      <linearGradient id=\"voSky\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#2b1c3a\"/><stop offset=\"1\" stop-color=\"#5b2f3a\"/>\n      </linearGradient>\n      <linearGradient id=\"voLava\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#ffd166\"/><stop offset=\"0.5\" stop-color=\"#f77f2e\"/>\n        <stop offset=\"1\" stop-color=\"#e03e1a\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#voSky)\"/>\n    <!-- 噴煙 -->\n    <g fill=\"#8c8391\" opacity=\"0.92\">\n      <circle cx=\"50\" cy=\"20\" r=\"13\"/><circle cx=\"37\" cy=\"26\" r=\"10\"/>\n      <circle cx=\"63\" cy=\"25\" r=\"11\"/><circle cx=\"45\" cy=\"14\" r=\"9\"/>\n      <circle cx=\"58\" cy=\"15\" r=\"8\"/>\n    </g>\n    <g fill=\"#a9a1ad\" opacity=\"0.55\">\n      <circle cx=\"43\" cy=\"19\" r=\"6\"/><circle cx=\"57\" cy=\"22\" r=\"5\"/>\n    </g>\n    <!-- 山体 -->\n    <path d=\"M50 40 L84 88 L16 88 Z\" fill=\"#5a4034\"/>\n    <path d=\"M50 40 L67 64 L33 64 Z\" fill=\"#6b4b3c\"/>\n    <!-- 溶岩流 -->\n    <path d=\"M50 40 L58 60 L54 62 L60 76 L54 78 L50 88 L46 78 L40 76 L45 62 L42 60 Z\"\n          fill=\"url(#voLava)\"/>\n    <path d=\"M50 41 L55 57 L50 70 L45 57 Z\" fill=\"#ffe08a\" opacity=\"0.85\"/>\n    <!-- 噴出 -->\n    <g fill=\"#ffcf5c\">\n      <circle cx=\"50\" cy=\"36\" r=\"4.5\"/>\n      <circle cx=\"40\" cy=\"30\" r=\"2.2\"/><circle cx=\"61\" cy=\"31\" r=\"2\"/>\n      <circle cx=\"55\" cy=\"25\" r=\"1.6\"/><circle cx=\"45\" cy=\"24\" r=\"1.4\"/>\n    </g>\n  ",
+    "mini": "\n    <g fill=\"#0b1520\">\n      <circle cx=\"50\" cy=\"26\" r=\"13\"/>\n      <circle cx=\"32\" cy=\"33\" r=\"9.5\"/>\n      <circle cx=\"68\" cy=\"32\" r=\"10.5\"/>\n    </g>\n    <path d=\"M50 40 L88 90 L12 90 Z\" fill=\"#0b1520\"/>\n    <path d=\"M50 44 L60 66 L50 90 L40 66 Z\" fill=\"#ffb020\"/>\n  "
+  },
+  "WF": {
+    "label": "山火事",
+    "detail": "\n    <defs>\n      <linearGradient id=\"wfSky\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#f9a03f\"/><stop offset=\"1\" stop-color=\"#c3341a\"/>\n      </linearGradient>\n      <linearGradient id=\"wfFlame\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">\n        <stop offset=\"0\" stop-color=\"#ff5722\"/><stop offset=\"0.55\" stop-color=\"#ff9636\"/>\n        <stop offset=\"1\" stop-color=\"#ffd45e\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#wfSky)\"/>\n    <!-- 炎 -->\n    <g fill=\"url(#wfFlame)\">\n      <path d=\"M50 82 C34 74 32 58 42 44 C43 52 47 55 50 56\n               C50 44 58 34 66 26 C64 40 74 46 74 60 C74 74 63 82 50 82 Z\"/>\n      <path d=\"M28 84 C20 76 22 64 30 56 C30 64 34 66 36 68\n               C35 58 40 50 45 44 C44 56 50 60 50 70 C50 79 40 86 28 84 Z\" opacity=\"0.75\"/>\n    </g>\n    <!-- 針葉樹のシルエット -->\n    <g fill=\"#3d1e17\">\n      <path d=\"M22 78 L28 60 L34 78 Z\"/><path d=\"M24 70 L28 56 L32 70 Z\"/>\n      <path d=\"M36 80 L43 58 L50 80 Z\"/><path d=\"M38 70 L43 54 L48 70 Z\"/>\n      <path d=\"M56 80 L62 62 L68 80 Z\"/><path d=\"M58 72 L62 58 L66 72 Z\"/>\n      <rect x=\"26.5\" y=\"76\" width=\"3\" height=\"8\"/>\n      <rect x=\"41.5\" y=\"78\" width=\"3\" height=\"8\"/>\n      <rect x=\"60.5\" y=\"78\" width=\"3\" height=\"8\"/>\n    </g>\n    <!-- 地面 -->\n    <path d=\"M0 84 Q50 78 100 84 L100 100 L0 100 Z\" fill=\"#2a1410\"/>\n    <!-- 火の粉 -->\n    <g fill=\"#ffd45e\">\n      <circle cx=\"76\" cy=\"34\" r=\"2\"/><circle cx=\"82\" cy=\"46\" r=\"1.5\"/>\n      <circle cx=\"24\" cy=\"40\" r=\"1.6\"/><circle cx=\"70\" cy=\"20\" r=\"1.3\"/>\n    </g>\n  ",
+    "mini": "\n    <path d=\"M56 92 C30 82 26 54 46 30 C47 46 54 50 59 51\n             C59 30 72 16 86 6 C82 32 96 42 96 62 C96 82 80 94 56 92 Z\"\n          fill=\"#0b1520\"/>\n    <path d=\"M58 86 C42 79 40 60 51 45 C51 56 56 59 60 60\n             C60 45 68 34 77 27 C74 45 85 52 85 65 C85 78 73 89 58 86 Z\"\n          fill=\"#ffb020\"/>\n    <g fill=\"#0b1520\">\n      <path d=\"M6 88 L22 34 L38 88 Z\"/>\n      <rect x=\"19\" y=\"82\" width=\"6\" height=\"12\"/>\n    </g>\n  "
+  },
+  "FL": {
+    "label": "洪水",
+    "detail": "\n    <defs>\n      <linearGradient id=\"flSky\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#3d5a80\"/><stop offset=\"1\" stop-color=\"#1d3557\"/>\n      </linearGradient>\n      <linearGradient id=\"flWater\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#6fc4ea\"/><stop offset=\"1\" stop-color=\"#2b7fb8\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#flSky)\"/>\n    <!-- 雨 -->\n    <g stroke=\"#9fd6f0\" stroke-width=\"2.4\" stroke-linecap=\"round\" opacity=\"0.65\">\n      <line x1=\"22\" y1=\"10\" x2=\"17\" y2=\"26\"/><line x1=\"38\" y1=\"6\"  x2=\"33\" y2=\"22\"/>\n      <line x1=\"55\" y1=\"9\"  x2=\"50\" y2=\"25\"/><line x1=\"72\" y1=\"7\"  x2=\"67\" y2=\"23\"/>\n      <line x1=\"86\" y1=\"14\" x2=\"81\" y2=\"30\"/>\n    </g>\n    <!-- 沈んだ家 -->\n    <g>\n      <path d=\"M30 54 L50 38 L70 54 L70 74 L30 74 Z\" fill=\"#e8e2d5\"/>\n      <path d=\"M26 55 L50 35 L74 55 L70 58 L50 42 L30 58 Z\" fill=\"#b4553f\"/>\n      <rect x=\"44\" y=\"60\" width=\"12\" height=\"14\" fill=\"#7a6a58\"/>\n      <rect x=\"34\" y=\"58\" width=\"8\" height=\"8\" fill=\"#8fb8cc\"/>\n      <rect x=\"58\" y=\"58\" width=\"8\" height=\"8\" fill=\"#8fb8cc\"/>\n    </g>\n    <!-- 水位 -->\n    <path d=\"M0 66 Q14 60 28 66 T56 66 T84 66 T112 66 L112 100 L0 100 Z\"\n          fill=\"url(#flWater)\" opacity=\"0.92\"/>\n    <path d=\"M0 76 Q16 70 32 76 T64 76 T96 76 T128 76 L128 100 L0 100 Z\"\n          fill=\"#2b7fb8\" opacity=\"0.85\"/>\n    <path d=\"M0 86 Q18 81 36 86 T72 86 T108 86 L108 100 L0 100 Z\" fill=\"#1f6493\"/>\n  ",
+    "mini": "\n    <g>\n      <path d=\"M28 46 L50 28 L72 46 L72 62 L28 62 Z\" fill=\"#0b1520\"/>\n      <path d=\"M24 48 L50 25 L76 48 L72 52 L50 32 L28 52 Z\" fill=\"#0b1520\"/>\n    </g>\n    <path d=\"M2 60 Q18 52 34 60 T66 60 T98 60 L98 96 L2 96 Z\" fill=\"#2b9fe0\"/>\n    <path d=\"M2 74 Q20 66 38 74 T74 74 T110 74 L110 96 L2 96 Z\" fill=\"#0b1520\" opacity=\"0.55\"/>\n  "
+  },
+  "DR": {
+    "label": "干ばつ",
+    "detail": "\n    <defs>\n      <linearGradient id=\"drSky\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#ffd89b\"/><stop offset=\"1\" stop-color=\"#e8a04a\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#drSky)\"/>\n    <!-- 太陽 -->\n    <circle cx=\"72\" cy=\"24\" r=\"11\" fill=\"#fff1c9\"/>\n    <g stroke=\"#fff1c9\" stroke-width=\"2.4\" stroke-linecap=\"round\" opacity=\"0.8\">\n      <line x1=\"72\" y1=\"6\"  x2=\"72\" y2=\"11\"/><line x1=\"72\" y1=\"37\" x2=\"72\" y2=\"42\"/>\n      <line x1=\"54\" y1=\"24\" x2=\"59\" y2=\"24\"/><line x1=\"85\" y1=\"24\" x2=\"90\" y2=\"24\"/>\n      <line x1=\"60\" y1=\"12\" x2=\"63\" y2=\"15\"/><line x1=\"81\" y1=\"33\" x2=\"84\" y2=\"36\"/>\n      <line x1=\"84\" y1=\"12\" x2=\"81\" y2=\"15\"/><line x1=\"63\" y1=\"33\" x2=\"60\" y2=\"36\"/>\n    </g>\n    <!-- 遠景の丘 -->\n    <path d=\"M0 58 Q26 48 52 56 T100 52 L100 66 L0 66 Z\" fill=\"#cf8434\"/>\n    <!-- ひび割れた地面 -->\n    <path d=\"M0 64 L100 60 L100 100 L0 100 Z\" fill=\"#e0a75f\"/>\n    <g stroke=\"#96602a\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\">\n      <path d=\"M0 78 L18 74 L34 82 L52 76 L72 84 L100 78\"/>\n      <path d=\"M12 100 L18 88 L14 74\"/><path d=\"M40 100 L36 88 L34 82\"/>\n      <path d=\"M64 100 L60 90 L66 82\"/><path d=\"M86 100 L82 88 L88 80\"/>\n      <path d=\"M26 92 L40 88\"/><path d=\"M52 94 L64 90\"/>\n    </g>\n    <!-- 枯れ木 -->\n    <g stroke=\"#6b4423\" stroke-width=\"3\" stroke-linecap=\"round\" fill=\"none\">\n      <path d=\"M26 84 L26 58\"/>\n      <path d=\"M26 68 L17 58\"/><path d=\"M26 64 L35 55\"/>\n      <path d=\"M26 74 L19 68\"/><path d=\"M26 60 L31 52\"/>\n      <path d=\"M17 58 L13 52\"/><path d=\"M35 55 L39 49\"/>\n    </g>\n  ",
+    "mini": "\n    <circle cx=\"50\" cy=\"30\" r=\"19\" fill=\"#ffcf5c\"/>\n    <path d=\"M0 58 L100 50 L100 100 L0 100 Z\" fill=\"#0b1520\"/>\n    <g stroke=\"#ffcf5c\" stroke-width=\"6\" fill=\"none\" stroke-linecap=\"round\">\n      <path d=\"M2 74 L32 66 L60 80 L100 70\"/>\n      <path d=\"M26 100 L32 80\"/>\n      <path d=\"M68 100 L60 82\"/>\n    </g>\n  "
+  },
+  "EQ": {
+    "label": "地震",
+    "detail": "\n    <defs>\n      <linearGradient id=\"eqSky\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#f5c518\"/><stop offset=\"1\" stop-color=\"#e0a800\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#eqSky)\"/>\n    <!-- 傾いた家 -->\n    <g transform=\"rotate(-11 44 58)\">\n      <path d=\"M26 56 L44 40 L62 56 L62 76 L26 76 Z\" fill=\"#2b2b2b\"/>\n      <path d=\"M22 57 L44 37 L66 57 L62 60 L44 44 L26 60 Z\" fill=\"#2b2b2b\"/>\n      <rect x=\"31\" y=\"60\" width=\"9\" height=\"9\" fill=\"#f5c518\"/>\n      <rect x=\"47\" y=\"60\" width=\"10\" height=\"16\" fill=\"#f5c518\"/>\n    </g>\n    <!-- 落下物 -->\n    <g fill=\"#2b2b2b\">\n      <rect x=\"68\" y=\"46\" width=\"6\" height=\"6\" rx=\"1.5\" transform=\"rotate(20 71 49)\"/>\n      <rect x=\"74\" y=\"58\" width=\"5\" height=\"5\" rx=\"1.2\" transform=\"rotate(-15 76 60)\"/>\n      <rect x=\"64\" y=\"62\" width=\"4\" height=\"4\" rx=\"1\" transform=\"rotate(35 66 64)\"/>\n    </g>\n    <!-- 地割れ -->\n    <path d=\"M0 78 L34 76 L44 84 L54 74 L66 82 L100 76 L100 100 L0 100 Z\" fill=\"#2b2b2b\"/>\n    <path d=\"M50 76 L44 90 L52 88 L46 100 L58 84 L50 86 L56 76 Z\" fill=\"#f5c518\"/>\n  ",
+    "mini": "\n    <g transform=\"rotate(-11 46 52)\" fill=\"#0b1520\">\n      <path d=\"M24 52 L46 32 L68 52 L68 74 L24 74 Z\"/>\n      <path d=\"M18 54 L46 28 L74 54 L69 58 L46 36 L23 58 Z\"/>\n    </g>\n    <path d=\"M0 78 L34 75 L46 86 L58 73 L70 83 L100 76 L100 100 L0 100 Z\" fill=\"#0b1520\"/>\n    <path d=\"M52 76 L44 94 L54 90 L46 100 L62 84 L52 87 L60 76 Z\" fill=\"#ffcf5c\"/>\n  "
+  },
+  "TC": {
+    "label": "台風",
+    "detail": "\n    <defs>\n      <radialGradient id=\"tcBg\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\">\n        <stop offset=\"0\" stop-color=\"#1b4a6b\"/><stop offset=\"1\" stop-color=\"#0e2c44\"/>\n      </radialGradient>\n      <linearGradient id=\"tcArm\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#8fdcff\"/><stop offset=\"1\" stop-color=\"#39a5dd\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#tcBg)\"/>\n    <!-- 渦の腕（2本・点対称） -->\n    <g fill=\"url(#tcArm)\">\n      <path d=\"M50 44 C64 40 82 46 88 60 C78 52 66 52 58 56\n               C70 58 78 66 78 76 C70 64 56 62 50 66 Z\"/>\n      <path d=\"M50 56 C36 60 18 54 12 40 C22 48 34 48 42 44\n               C30 42 22 34 22 24 C30 36 44 38 50 34 Z\"/>\n    </g>\n    <!-- 外周の淡い渦 -->\n    <g fill=\"#5fc4ec\" opacity=\"0.35\">\n      <path d=\"M50 30 C70 26 90 40 92 62 C84 44 66 38 50 42 Z\"/>\n      <path d=\"M50 70 C30 74 10 60 8 38 C16 56 34 62 50 58 Z\"/>\n    </g>\n    <!-- 目 -->\n    <circle cx=\"50\" cy=\"50\" r=\"7\" fill=\"#0e2c44\"/>\n    <circle cx=\"50\" cy=\"50\" r=\"4\" fill=\"#d8f2ff\"/>\n  ",
+    "mini": "\n    <g fill=\"#0b1520\">\n      <path d=\"M50 42 C66 37 86 44 93 60 C82 51 67 51 58 55\n               C72 58 81 67 81 79 C72 65 56 62 50 67 Z\"/>\n      <path d=\"M50 58 C34 63 14 56 7 40 C18 49 33 49 42 45\n               C28 42 19 33 19 21 C28 35 44 38 50 33 Z\"/>\n    </g>\n    <circle cx=\"50\" cy=\"50\" r=\"8\" fill=\"#0b1520\"/>\n    <circle cx=\"50\" cy=\"50\" r=\"4.5\" fill=\"#8fdcff\"/>\n  "
+  },
+  "NEWS": {
+    "label": "報道",
+    "detail": "\n    <defs>\n      <linearGradient id=\"nwBg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\n        <stop offset=\"0\" stop-color=\"#7a2230\"/><stop offset=\"1\" stop-color=\"#4a141d\"/>\n      </linearGradient>\n    </defs>\n    <circle cx=\"50\" cy=\"50\" r=\"50\" fill=\"url(#nwBg)\"/>\n    <!-- 発信を表す同心円 -->\n    <g fill=\"none\" stroke=\"#ff8a94\" stroke-linecap=\"round\">\n      <path d=\"M30 34 A28 28 0 0 0 30 66\" stroke-width=\"3\" opacity=\"0.45\"/>\n      <path d=\"M70 34 A28 28 0 0 1 70 66\" stroke-width=\"3\" opacity=\"0.45\"/>\n      <path d=\"M37 40 A18 18 0 0 0 37 60\" stroke-width=\"3\" opacity=\"0.7\"/>\n      <path d=\"M63 40 A18 18 0 0 1 63 60\" stroke-width=\"3\" opacity=\"0.7\"/>\n    </g>\n    <!-- 新聞 -->\n    <g>\n      <rect x=\"34\" y=\"38\" width=\"32\" height=\"26\" rx=\"2\" fill=\"#f2e9dc\"/>\n      <rect x=\"38\" y=\"42\" width=\"15\" height=\"7\" fill=\"#4a141d\"/>\n      <g fill=\"#8a7f72\">\n        <rect x=\"38\" y=\"52\" width=\"15\" height=\"2\"/><rect x=\"38\" y=\"56\" width=\"15\" height=\"2\"/>\n        <rect x=\"38\" y=\"60\" width=\"11\" height=\"2\"/>\n        <rect x=\"56\" y=\"42\" width=\"7\" height=\"2\"/><rect x=\"56\" y=\"46\" width=\"7\" height=\"2\"/>\n        <rect x=\"56\" y=\"50\" width=\"7\" height=\"2\"/><rect x=\"56\" y=\"54\" width=\"7\" height=\"2\"/>\n        <rect x=\"56\" y=\"58\" width=\"7\" height=\"2\"/>\n      </g>\n    </g>\n  ",
+    "mini": "\n    <g fill=\"none\" stroke=\"#ffc9cd\" stroke-width=\"7\" stroke-linecap=\"round\">\n      <path d=\"M20 24 A36 36 0 0 0 20 76\"/>\n      <path d=\"M80 24 A36 36 0 0 1 80 76\"/>\n    </g>\n    <path d=\"M32 30 H68 A4 4 0 0 1 72 34 V60 A4 4 0 0 1 68 64 H52 L42 76 V64 H32\n             A4 4 0 0 1 28 60 V34 A4 4 0 0 1 32 30 Z\" fill=\"#0b1520\"/>\n    <g fill=\"#ffd7da\">\n      <rect x=\"35\" y=\"39\" width=\"30\" height=\"5\" rx=\"2\"/>\n      <rect x=\"35\" y=\"50\" width=\"20\" height=\"5\" rx=\"2\"/>\n    </g>\n  "
+  }
+};
+
+// 表示するかどうかは「災害の種類ごと」に持つ。
+// 層(quake/hazard/conflict)は取得元の単位、ICONS のキーは表示の単位。
+const KIND_ORDER = ['EQ','TC','FL','VO','WF','DR','NEWS'];
+
+// 種類 → どの層から来るか
+const KIND_LAYER = {
+  EQ:'quake', TC:'hazard', FL:'hazard', VO:'hazard',
+  WF:'hazard', DR:'hazard', NEWS:'conflict',
+};
+
+// 層ごとの色（丸の背景）
+const LAYER_COLOR = { quake:'--quake', hazard:'--hazard', conflict:'--conflict' };
+
+// 記号を入れるので、丸だけのときより大きめにする
+function radius(sev){ return 9 + sev * 2.2; }
+
+function markerHTML(ev, r){
+  const ic = ICONS[ev.icon] || ICONS.NEWS;
+  const size = r * 2;
+  const pulse = ev.severity >= 5 ? ' sev5' : '';
+  const inner = size * 0.9;
+  const off = (size - inner) / 2;
+  return '<div class="mk ' + ev.layer + pulse + '" style="width:' + size + 'px;height:' + size + 'px">'
+    + '<svg class="ic" width="' + inner + '" height="' + inner + '" viewBox="0 0 100 100" '
+    + 'style="margin:' + off.toFixed(1) + 'px" aria-hidden="true">' + ic.mini + '</svg>'
+    + '</div>';
+}
+
+function renderLayer(key){
+  const g = groups[key];
+  g.clearLayers();
+  for(const ev of state.events[key]){
+    // 種類ごとの表示切替。オフの種類は地図に出さない。
+    if(!state.on[ev.icon]) continue;
+    const r = radius(ev.severity);
+    const ic = ICONS[ev.icon] || ICONS.NEWS;
+    const m = L.marker([ev.lat, ev.lon], {
+      icon: L.divIcon({
+        className:'',
+        html: markerHTML(ev, r),
+        iconSize:[r*2,r*2], iconAnchor:[r,r],
+      }),
+      keyboard:true,
+      title: ic.label + '：' + ev.title,
+    });
+    m.on('click', ()=>showDetail(ev));
+    m.addTo(g);
+  }
+  updateKindButtons();
+}
+
+// 種類ごとの件数を数える（取得できている層のみ）
+function countByKind(){
+  const c = {};
+  for(const k of KIND_ORDER) c[k] = 0;
+  for(const layer of Object.keys(state.events)){
+    for(const ev of state.events[layer]){
+      if(c[ev.icon] !== undefined) c[ev.icon]++;
+    }
+  }
+  return c;
+}
+
+function updateKindButtons(){
+  const c = countByKind();
+  for(const k of KIND_ORDER){
+    const btn = document.querySelector('#kinds button[data-kind="' + k + '"]');
+    if(!btn) continue;
+    const layer = KIND_LAYER[k];
+    const failed = state.status[layer] === 'fail';
+    const n = btn.querySelector('[data-n]');
+    if(failed){
+      n.textContent = '—';
+      btn.dataset.failed = '1';
+      btn.title = LAYERS[layer].source + ' を取得できませんでした';
+    } else {
+      n.textContent = String(c[k]);
+      delete btn.dataset.failed;
+      btn.title = ICONS[k].label + ' を表示／非表示';
+    }
+    btn.setAttribute('aria-pressed', String(!!state.on[k]));
+  }
+  // 「すべて」ボタンの状態
+  const allOn = KIND_ORDER.every(k => state.on[k]);
+  const allBtn = document.getElementById('kindAll');
+  if(allBtn){
+    allBtn.setAttribute('aria-pressed', String(allOn));
+    allBtn.textContent = allOn ? 'すべて解除' : 'すべて表示';
+  }
+}
+
+function updateStatusBar(){
+  const failed = Object.entries(state.status).filter(([,v]) => v === 'fail').map(([k]) => k);
+  const okCount = Object.values(state.status).filter(v => v === 'ok').length;
+  const dot = document.getElementById('dot');
+  dot.classList.toggle('stale', failed.length > 0 && okCount > 0);
+  dot.classList.toggle('dead', okCount === 0);
+
+  const t = state.updatedAt ? new Date(state.updatedAt) : null;
+  const hhmm = t ? String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0') : '--:--';
+  document.getElementById('stamp').textContent =
+    okCount === 0 ? 'データを取得できません' : hhmm + ' 更新';
+
+  const notice = document.getElementById('notice');
+  if(failed.length){
+    const names = failed.map(k => {
+      const base = LAYERS[k].label + '（' + LAYERS[k].source + '）';
+      return state.reason[k] ? base + ' ' + state.reason[k] : base;
+    }).join('、');
+    notice.innerHTML = '';
+    notice.append(names + ' を取得できませんでした。他の情報は通常どおり表示しています。');
+    const b = document.createElement('button');
+    b.textContent = '再試行';
+    b.onclick = () => loadAll();
+    notice.appendChild(b);
+    notice.classList.add('show');
+  } else {
+    notice.classList.remove('show');
+  }
+}
+
+/* ---- 詳細パネル ---- */
+function showDetail(ev){
+  const d = document.getElementById('detail');
+  d.hidden = false;
+  const kind = document.getElementById('dKind');
+  kind.className = 'eyebrow ' + ev.layer;
+  kind.textContent = ev.kind;
+  // 詳細版アイコン（描き込みあり）を見出しに表示
+  const ic = ICONS[ev.icon] || ICONS.NEWS;
+  document.getElementById('dIcon').innerHTML =
+    '<svg viewBox="0 0 100 100" aria-hidden="true">' + ic.detail + '</svg>';
+  document.getElementById('dTitle').textContent = ev.title;
+
+  const dl = document.getElementById('dList');
+  dl.innerHTML = '';
+  for(const [k,v] of Object.entries(ev.detail || {})){
+    if(k === '注意') continue;
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v;
+    dl.append(dt, dd);
+  }
+
+  const when = new Date(ev.time);
+  document.getElementById('dWhen').textContent =
+    isNaN(when) ? '' : when.toLocaleString('ja-JP', { hour12:false });
+
+  const extra = document.getElementById('dExtra');
+  extra.innerHTML = '';
+  if(ev.detail && ev.detail['注意']){
+    const p = document.createElement('p');
+    p.className = 'caveat';
+    p.textContent = ev.detail['注意'];
+    extra.appendChild(p);
+  }
+  if(ev.articles && ev.articles.length){
+    const ul = document.createElement('ul');
+    ul.className = 'arts';
+    for(const a of ev.articles){
+      const li = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = a.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      link.textContent = a.title;
+      li.appendChild(link); ul.appendChild(li);
+    }
+    extra.appendChild(ul);
+  }
+
+  const src = document.getElementById('dSrc');
+  src.innerHTML = '';
+  src.append('出典：' + ev.source);
+  if(ev.url){
+    src.append(' / ');
+    const a = document.createElement('a');
+    a.href = ev.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    a.textContent = '公式ページ';
+    src.appendChild(a);
+  }
+
+  requestAnimationFrame(()=> d.classList.add('open'));
+  map.panTo([ev.lat, ev.lon], { animate:true });
+}
+
+function closeDetail(){
+  const d = document.getElementById('detail');
+  d.classList.remove('open');
+  setTimeout(()=>{ d.hidden = true; }, 220);
+}
+
+/* ---- 読み込み ---- */
+// 各層を独立して取得する。1つが失敗しても他は表示される。
+async function loadLayer(key, fn){
+  try{
+    state.events[key] = await fn();
+    state.status[key] = 'ok';
+  }catch(err){
+    // 前回のデータがあれば保持したまま、状態だけ失敗にする
+    state.status[key] = 'fail';
+    state.reason[key] = (err && err.temporary)
+      ? 'アクセス制限中（時間をおくと自動で戻ります）'
+      : null;
+    console.warn('[' + key + '] 取得失敗:', err && err.message);
+  }
+  renderLayer(key);
+  updateStatusBar();
+}
+
+async function loadAll(){
+  document.getElementById('notice').classList.remove('show');
+  await Promise.allSettled([
+    loadLayer('quake', fetchQuakes),
+    loadLayer('hazard', fetchHazards),
+    loadLayer('conflict', fetchConflictReports),
+  ]);
+  if(Object.values(state.status).some(v => v === 'ok')) state.updatedAt = Date.now();
+  updateStatusBar();
+}
+
+initMap();
+buildKindToggles();
+document.getElementById('dClose').onclick = closeDetail;
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeDetail(); });
+loadAll();
+setInterval(loadAll, REFRESH_MS);
+// タブに戻ったとき、最終更新から1時間以上経っていれば取り直す
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible' &&
+     state.updatedAt && Date.now() - state.updatedAt > REFRESH_MS){
+    loadAll();
+  }
+});
+</script>
+</body>
+</html>
