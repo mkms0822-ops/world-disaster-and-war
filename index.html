@@ -229,6 +229,35 @@ async function getJSON(url, timeoutMs = 20000){
   } finally { clearTimeout(t); }
 }
 
+/* ---- CORSプロキシ経由の取得 ----
+   GDACS・GDELT はブラウザから直接呼べない（CORSヘッダを返さない）ため、
+   公開プロキシを順に試す。1つが失敗しても次のプロキシに自動で切り替える。
+   直接続も最初に試すので、CORS対応済みなら余計な中継を挟まない。 */
+const CORS_PROXIES = [
+  // {url} をそのまま渡す形式（生のレスポンスをそのまま返す）
+  (u)=>'https://corsproxy.io/?url=' + encodeURIComponent(u),
+  (u)=>'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  (u)=>'https://thingproxy.freeboard.io/fetch/' + u,
+];
+
+// 直接 → 各プロキシの順に試し、最初に成功した JSON を返す。
+async function getJSONviaProxy(url, { direct = true, timeoutMs = 20000 } = {}){
+  const attempts = [];
+  if(direct) attempts.push(url);
+  for(const mk of CORS_PROXIES) attempts.push(mk(url));
+
+  let lastErr = null;
+  for(const target of attempts){
+    try{
+      return await getJSON(target, timeoutMs);
+    }catch(err){
+      lastErr = err;
+      // 次の候補へ
+    }
+  }
+  throw lastErr || new Error('全ての取得経路が失敗しました');
+}
+
 /* ---- 地震（USGS） ---- */
 // summary feed は {magnitude}_{period}.geojson のテンプレートのみ有効。
 const USGS = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson';
@@ -243,7 +272,8 @@ function quakeSeverity(mag){
 }
 
 async function fetchQuakes(){
-  const j = await getJSON(USGS);
+  // USGS は通常 CORS 対応だが、稀な失敗に備え直接続優先でプロキシも試す。
+  const j = await getJSONviaProxy(USGS);
   const out = [];
   for(const f of j.features || []){
     const p = f.properties || {};
@@ -292,7 +322,8 @@ async function fetchHazards(){
     + '?eventlist=TC;FL;VO;WF;DR'
     + '&fromdate=' + ymd(from) + '&todate=' + ymd(to)
     + '&alertlevel=Green;Orange;Red';
-  const j = await getJSON(url);
+  // GDACS は CORS 非対応なので、直接続を試したのちプロキシに切り替える。
+  const j = await getJSONviaProxy(url);
   const out = [];
   for(const f of j.features || []){
     const p = f.properties || {};
@@ -320,20 +351,21 @@ async function fetchHazards(){
   return out;
 }
 
-/* ---- 報道イベント（GDELT / Cloudflare Worker 経由） ---- */
+/* ---- 報道イベント（GDELT 公式 API・公開プロキシ経由） ---- */
 // GDELT は CORS ヘッダを返さないため、ブラウザから直接呼べない。
-// Cloudflare Worker の中継を挟む。下の URL を自分の Worker のものに書き換えること。
+// 以前は自前の Cloudflare Worker を経由していたが、それが落ちると報道が
+// 出なくなるので、公開 CORS プロキシに順に切り替える方式へ変更した。
 //
-//   ↓↓↓ ここを書き換えてください ↓↓↓
-const CONFLICT_PROXY = 'https://gdelt-proxy.dwa8791.workers.dev/';
-//   ↑↑↑ ここを書き換えてください ↑↑↑
-//
+// GDELT GEO 2.0 API を直接叩く。query に紛争関連語を与え、24時間分を取得。
 // これは「戦況」ではなく報道の集積地点。詳細に必ず注意書きを出す。
+const GDELT_GEO = 'https://api.gdeltproject.org/api/v2/geo/geo'
+  + '?query=' + encodeURIComponent('(conflict OR clash OR strike OR attack OR protest OR war)')
+  + '&format=GeoJSON&timespan=1440';
 
 async function fetchConflictReports(){
   // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
-  // GEO API の timespan は分単位（15〜1440）。1440 = 直近24時間。
-  const j = await getJSON(CONFLICT_PROXY + '?timespan=1440');
+  // GDELT は直接続不可なので direct:false でプロキシのみを試す。
+  const j = await getJSONviaProxy(GDELT_GEO, { direct:false });
   if(j && j.error === 'ratelimited'){
     const e = new Error('GDELT のアクセス制限中です。数分おいて再試行してください。');
     e.temporary = true;
@@ -361,7 +393,7 @@ async function fetchConflictReports(){
         地点: p.name || '—',
         注意: 'これは報道の集積地点であり、戦況・被害の確認情報ではありません。',
       },
-      articles: extractLinks(p.html).slice(0,5),
+      articles: extractLinks(p.html || p.shareimage || '').slice(0,5),
     });
   }
   return out;
